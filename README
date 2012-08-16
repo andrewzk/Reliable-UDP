@@ -1,0 +1,108 @@
+Reliable UDP (RUDP)
+Author: Andrew Keating <andrewzkeating@gmail.com>
+May 31, 2011
+
+This project implements a reliability layer on top of UDP in C. Reliability is 
+achieved using sliding window flow control, ARQ-based retransmissions and 
+detection of out-of-order packets.
+
+Usage notes:
+
+To compile, simply run make.
+
+This will compile the RUDP library and two applications which use RUDP. The 
+sample applications are vs_send and vs_recv, a file sending application and 
+a file receiving application.
+
+Run the receiver: ./vs_recv [-d] port
+
+Run the sender: ./vs_send [-d] host1:port1 [host2:port2] ... file1 [file2]...
+
+Note that vs_send supports sending multiple files simultaneously to multiple 
+hosts, but both of these are optional - it is perfectly okay to send a single 
+file to a single host.
+
+If executing both the client and server locally, be sure to do so in different 
+directories.
+
+Note that vs_send and vs_recv are only sample applications. Other applications 
+can be written using RUDP.
+
+The event callback system in RUDP was developed by Olof Hagsand and Peter Sjödin
+
+Author's note:
+
+The RUDP receiver code contains some rather complex nested logic. While it may 
+benefit from refactoring, it is mostly a necessary evil due to RUDP's numerous 
+protocol states and transitions. 
+
+Technical notes:
+
+For state/session management, we maintain a list of RUDP sockets. Each RUDP 
+socket has a list of sessions associated with the socket, in addition to 
+function pointers for event handler functions which can be registered by 
+applications. Each RUDP session is uniquely identified by the IP address and 
+port of the peer with whom the session is established. We logically separate 
+sender and receiver sessions, although a single session may contain both a 
+sender session and receiver session if both parties exchange data. Within a 
+sender session, we maintain a sliding window of transmitted but unacknowledged 
+packets, a queue of packets which have not yet been transmitted, and the 
+sequence number of the last packet transmitted. Within a receiver session, 
+we maintain the sequence number of the last packet received.
+
+We utilize two types of events in RUDP – one which is triggered when data is 
+received on a RUDP socket, and another which is triggered when we detect packet 
+loss (via a timeout event).
+
+Applications can register two types of events using the RUDP API: one which is 
+used to pass received data from the RUDP socket to the application, and another 
+which handles other events. We support two other events: RUDP_EVENT_TIMEOUT, 
+which indicates that a packet has been retransmitted more than RUDP_MAXRETRANS 
+times, and RUDP_EVENT_CLOSE which indicates that an RUDP socket has been closed.
+
+RUDP heavily relies upon sequence numbers to provide reliability. An RUDP 
+sequence number is an unsigned 32-bit integer, which is transmitted as a field 
+in the RUDP header. When we send a SYN to initiate an RUDP session, a random 
+sequence number is generated for the SYN packet. Subsequent packets are sent 
+with incremented sequence numbers. ACK packets have a sequence number which is 
+1 greater than the sequence number of the packet they acknowledge. When 
+comparing sequence numbers, we use macros which handle the multiple cases 
+caused by potential integer overflow.
+
+As previously noted, RUDP sender sessions maintain a sliding window of 
+transmitted but unacknowledged packets. The size of the sliding window is 
+defined by RUDP_WINDOW. When the application provides RUDP with data to be 
+sent, we determine whether any slots in the sliding window are open. If so, the 
+packet can immediately be added to the window and transmitted. If not, we must 
+queue the packet to be delivered once it can acquire a slot in the window.
+
+Upon receiving an ACK packet, we inspect the first item in the sliding window. 
+If the ACK packet is intended to acknowledge the first window item, we remove 
+this item from the sliding window and shift any subsequent window items to the 
+left, creating space in the window for new packets to be sent. As long as 
+RUDP_WINDOW is greater than 1, this scheme provides better efficiency than 
+stop-and-wait flow control by allowing up to RUDP_WINDOW outstanding 
+unacknowledged packets to be sent.
+
+When a non-ACK packet is sent in RUDP, a timer event is registered to occur 
+after RUDP_TIMEOUT milliseconds. If the timeout event fires, the packet 
+associated with it will be retransmitted, unless the packet has already been 
+retransmitted RUDP_MAXRETRANS times, in which case we will trigger a 
+RUDP_EVENT_TIMEOUT event.
+
+When we receive an ACK, the timeout event for the packet being acknowledged is 
+canceled. In RUDP, timeout events represent the detection of packet loss. Since 
+we do not utilize negative acknowledgments, we instead detect packet loss 
+implicitly when an ACK is not received.
+
+When an application calls rudp_close on an RUDP socket, we attempt to terminate 
+all RUDP sessions which exist on the socket. For each active sender session on 
+the socket, we wait until all queued data has been successfully transmitted, 
+after which we send a FIN message. When a corresponding ACK has been received 
+for the FIN message, we consider the sender session to be complete. Similarly, 
+we consider a receiver session to be complete after it has received and 
+acknowledged a FIN. Once all sessions on the socket are complete, we close the 
+underlying UDP socket, and if the application has registered an RUDP event 
+handler, we fire a RUDP_EVENT_CLOSE event.
+
+Tested on Ubuntu 10.04 LTS. Verified memory leak-free by Valgrind.
